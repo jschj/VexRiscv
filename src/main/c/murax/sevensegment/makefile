@@ -1,4 +1,4 @@
-PROJ_NAME=hello_world
+PROJ_NAME=seven_segment
 DEBUG=no
 BENCH=no
 MULDIV=no

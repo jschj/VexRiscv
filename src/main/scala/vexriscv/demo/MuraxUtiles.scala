@@ -55,6 +55,9 @@ case class MuraxPipelinedMemoryBusRam(onChipRamSize : BigInt, onChipRamHexFile :
   }
 
   val ram = Mem(Bits(32 bits), onChipRamSize / 4)
+  //ram.generateAsBlackBox()
+  //ram.setTechnology(auto)
+  ram.addAttribute("ram_style", "block")
   io.bus.rsp.valid := RegNext(io.bus.cmd.fire && !io.bus.cmd.write) init(False)
   io.bus.rsp.data := ram.readWriteSync(
     address = (io.bus.cmd.address >> 2).resized,
@@ -66,7 +69,7 @@ case class MuraxPipelinedMemoryBusRam(onChipRamSize : BigInt, onChipRamHexFile :
   io.bus.cmd.ready := True
 
   if(onChipRamHexFile != null){
-    HexTools.initRam(ram, onChipRamHexFile, 0x80000000l)
+    HexTools.initRam(ram, onChipRamHexFile, 0x80000000l, allowOverflow = true)
     if(bigEndian)
       // HexTools.initRam (incorrectly) assumes little endian byte ordering
       for((word, wordIndex) <- ram.initialContent.zipWithIndex)

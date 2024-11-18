@@ -1,11 +1,13 @@
 package vexriscv.demo
 
+import mimasa7.{Apb3SevenSegmentConfig, Apb3SevenSegmentCtrl, MimasA7JtagTap, SevenSegmentHex, SevenSegmentHexConfig}
 import spinal.core._
+import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.amba3.apb._
 import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.bus.simple.PipelinedMemoryBus
-import spinal.lib.com.jtag.Jtag
+import spinal.lib.com.jtag.{Jtag, JtagState, SimpleJtagTap}
 import spinal.lib.com.spi.ddr.SpiXdrMaster
 import spinal.lib.com.uart._
 import spinal.lib.io.{InOutWrapper, TriStateArray}
@@ -15,6 +17,9 @@ import vexriscv.plugin._
 import vexriscv.{VexRiscv, VexRiscvConfig, plugin}
 import spinal.lib.com.spi.ddr._
 import spinal.lib.bus.simple._
+import spinal.lib.com.jtag.sim.JtagVpi
+import spinal.sim.SimManagerContext
+
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.Seq
 
@@ -87,7 +92,7 @@ object MuraxConfig{
       ),
       new CsrPlugin(CsrPluginConfig.smallest(mtvecInit = if(withXip) 0xE0040020l else 0x80000020l)),
       new DecoderSimplePlugin(
-        catchIllegalInstruction = false
+        catchIllegalInstruction = true
       ),
       new RegFilePlugin(
         regFileReadyKind = plugin.SYNC,
@@ -541,3 +546,176 @@ object MuraxAsicBlackBox extends App{
   config.generateVerilog(Murax(MuraxConfig.default()))
 }
 
+case class MuraxTop(config : MuraxConfig) extends Component {
+  val io = new Bundle {
+    //Clocks / reset
+    val asyncReset = in Bool()
+    val mainClk = in Bool()
+
+    // JTAG
+    val jtag = slave(Jtag())
+
+    // Seven segment IO
+    val sevenEnable = out Bits (4 bits)
+    val sevenData = out Bits (8 bits)
+
+    // leds
+    val leds = out Bits (8 bits)
+  }
+
+  private val murax = new Murax(config)
+
+  io.asyncReset <> murax.io.asyncReset
+  io.mainClk <> murax.io.mainClk
+  io.jtag <> murax.io.jtag
+
+  // default drivers
+  murax.io.uart.rxd := False
+  murax.io.gpioA.read := B(0, config.gpioWidth bits)
+
+  val muraxClockingArea = new ClockingArea(murax.systemClockDomain) {
+    private val ledBuffer = RegInit(B"00000000")
+    ledBuffer := (ledBuffer & ~murax.io.gpioA.writeEnable) |
+      (murax.io.gpioA.write & murax.io.gpioA.writeEnable)
+
+    io.leds := ledBuffer
+
+
+    val sevenHex = SevenSegmentHex(SevenSegmentHexConfig(4, 100 Hz))
+    io.sevenEnable := sevenHex.io.enableBus
+    io.sevenData := sevenHex.io.dataBus
+
+    val slowArea = new SlowArea(1 Hz) {
+      val counter = Counter(0 until 0xffff, inc = True)
+      sevenHex.io.number.valid := True
+      sevenHex.io.number.payload := counter
+    }
+  }
+
+
+}
+
+object MuraxMimasA7 {
+  def main(args: Array[String]): Unit = {
+    val spinalConfig = SpinalConfig(
+      /*
+      defaultConfigForClockDomains = ClockDomainConfig(
+        clockEdge = RISING, resetKind = spinal.core.ASYNC,
+        resetActiveLevel = HIGH, softResetActiveLevel = HIGH, clockEnableActiveLevel = HIGH
+      )
+       */
+    ).withoutEnumString()
+
+    //.addStandardMemBlackboxing(blackboxAll)
+
+    SpinalVerilog(spinalConfig)(MuraxTop(
+      MuraxConfig.default.copy(
+        coreFrequency = 35 MHz,
+        onChipRamSize = 8 kB,
+        //onChipRamHexFile = "src/main/ressource/hex/muraxDemo.hex",
+        onChipRamHexFile = "src/main/c/murax/sevensegment/build/seven_segment.hex",
+//        onChipRamHexFile = "src/main/c/murax/hello_world/build/hello_world.hex",
+        gpioWidth = 8
+      )
+    ))
+  }
+}
+
+object MuraxMimasA7Sim {
+  def main(args: Array[String]): Unit = {
+    val spinalConfig = SpinalConfig(
+      /*
+      defaultConfigForClockDomains = ClockDomainConfig(
+        clockEdge = RISING, resetKind = spinal.core.ASYNC,
+        resetActiveLevel = HIGH, softResetActiveLevel = HIGH, clockEnableActiveLevel = HIGH
+      )
+       */
+    )
+
+    //.addStandardMemBlackboxing(blackboxAll)
+
+    // withVcdWave.
+    SimConfig.allOptimisation.withFstWave.compile(MuraxTop(
+      MuraxConfig.default.copy(
+        coreFrequency = 35 MHz,
+        onChipRamSize = 8 kB,
+        //onChipRamHexFile = "src/main/ressource/hex/muraxDemo.hex",
+        onChipRamHexFile = "src/main/c/murax/sevensegment/build/seven_segment.hex",
+        gpioWidth = 8,
+        hardwareBreakpointCount = 1
+      ))).doSimUntilVoid { dut =>
+
+      val period = TimeNumber(SimManagerContext.current.manager.timePrecision * 2)
+
+      val mainClkPeriod = (1e12 / dut.config.coreFrequency.toDouble).toLong
+      val mainClockDomain = ClockDomain(dut.io.mainClk, dut.io.asyncReset)
+      mainClockDomain.forkStimulus(2)
+
+      val jtagClkPeriod = mainClkPeriod * 4
+      val jtagClockDomain = ClockDomain(dut.io.jtag.tck)
+      jtagClockDomain.forkStimulus(jtagClkPeriod)
+      //dut.clockDomain.forkStimulus(1 Hz)
+      //clockDomain.forkStimulus(1 Hz)
+
+      //val clockPeriod = TimeNumber(2)
+      //val value = timeToLong(clockPeriod / 2)
+      //println(s"precision = ${SimManagerContext.current.manager.timePrecision}")
+
+      //val jtagTcpThread = MyJtagTcp(dut.io.jtag, jtagClockPeriod)
+      val jtagTcpThread = JtagVpi(dut.io.jtag, port = 5555, jtagClkPeriod = period)
+      //val jtagDriver = new JtagDriverWrapper(dut.io.jtag, period)
+
+      val clockThread = fork {
+        var ticks = 0
+
+        while (true) {
+          //println("clock loop")
+//          jtagClockDomain.clockToggle()
+//          sleep(jtagClkPeriod)
+          mainClockDomain.waitRisingEdge()
+
+          ticks += 1
+          if (ticks % 10000 == 0)
+            println(s"tick $ticks")
+        }
+      }
+
+      val stateThread = fork {
+        var lastLeds = -1
+
+        while (true) {
+          val currentLeds = dut.io.leds.toInt
+
+          if (currentLeds != lastLeds)
+            println(s"LEDs: ${currentLeds.toBinaryString.reverse.padTo(8, '0').reverse}")
+
+          lastLeds = currentLeds
+
+          // sleep() is a kind of yield()
+          sleep(jtagClkPeriod)
+        }
+      }
+
+      /*
+      println("performing reset")
+      jtagDriver.doResetTap()
+      println("done")
+
+      println("reading IDCODE")
+      val idCode = jtagDriver.doReadDR(0)
+      println(s"DR = 0x${idCode.toHexString}")
+      println("done")
+
+      println("reading DR")
+      val dr = jtagDriver.doReadDR(5)
+      println(s"DR = 0x${dr.toHexString}")
+      println("done")
+       */
+
+      stateThread.join()
+      clockThread.join()
+      jtagTcpThread.join()
+
+    }
+  }
+}

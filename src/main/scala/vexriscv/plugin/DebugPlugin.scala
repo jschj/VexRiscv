@@ -248,6 +248,8 @@ class DebugPlugin(var debugClockDomain : ClockDomain, hardwareBreakpointCount : 
       }), hardwareBreakpointCount)
       hardwareBreakpoints.foreach(_.valid init(False))
 
+      // FIXME: Reading from memory is done via injecting load instructions. For that, the address is written
+      // into the x1 register first. So this should be observable?
       val busReadDataReg = Reg(Bits(32 bit))
       when(stages.last.arbitration.isValid) {
         busReadDataReg := stages.last.output(REGFILE_WRITE_DATA)
@@ -275,6 +277,10 @@ class DebugPlugin(var debugClockDomain : ClockDomain, hardwareBreakpointCount : 
 
       injectionPort.valid := False
       injectionPort.payload := io.bus.cmd.data
+
+
+      val debugPluginIsZero = (io.bus.cmd.valid && (io.bus.cmd.address(7 downto 2) === 0x0)).dontSimplifyIt()
+      val debugPluginIsOne = (io.bus.cmd.valid && (io.bus.cmd.address(7 downto 2) === 0x1)).dontSimplifyIt()
 
       when(io.bus.cmd.valid) {
         switch(io.bus.cmd.address(7 downto 2)) {
